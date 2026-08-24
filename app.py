@@ -100,17 +100,30 @@ def _clean_feature_name(name: str) -> str:
 def _align_to_model_features(X_processed, df_raw_index) -> pd.DataFrame:
     """
     يبني DataFrame بأسماء الأعمدة الناتجة من الـ preprocessor، وبعدين يحاذيها
-    تلقائيًا (يختار نفس الأعمدة بنفس الترتيب) مع الأعمدة اللي الموديل فعليًا
-    اتدرب عليها — عشان أي اختلاف بين preprocessor.joblib والموديل (زي عمود
-    Class إضافي بسبب drop='first' مش متطابقة) يتصلح تلقائيًا من غير ما نلمس
-    الموديل أو نعيد تدريبه.
+    تلقائيًا مع الأعمدة اللي الموديل فعليًا اتدرب عليها — عشان أي اختلاف بين
+    preprocessor.joblib والموديل يتصلح تلقائيًا من غير ما نلمس الموديل.
     """
     ct = preprocessor.named_steps["column_transformer"]
     raw_names = ct.get_feature_names_out()
     clean_names = [_clean_feature_name(n) for n in raw_names]
     X_df = pd.DataFrame(X_processed, columns=clean_names, index=df_raw_index)
 
-    model_features = list(model.get_booster().feature_names)
+    booster_feature_names = model.get_booster().feature_names
+
+    if booster_feature_names is None:
+        # الموديل اتدرب على numpy array (من غير أسماء أعمدة) مش DataFrame،
+        # فمفيش طريقة نحاذي بالاسم. أقصى حاجة نقدر نتأكد منها هي العدد.
+        expected_n = getattr(model, "n_features_in_", None)
+        if expected_n is not None and X_df.shape[1] != expected_n:
+            raise ValueError(
+                f"عدد أعمدة الـ preprocessor ({X_df.shape[1]}) مش متطابق مع عدد "
+                f"الأعمدة اللي الموديل اتدرب عليها ({expected_n})، والموديل ملوش "
+                "أسماء أعمدة محفوظة عشان نحاذيهم تلقائيًا بالاسم. لازم preprocessor "
+                "والموديل يتدربوا في نفس الـ run على نفس البيانات."
+            )
+        return X_df  # نفس ترتيب أعمدة الـ column_transformer، من غير تصفية بالاسم
+
+    model_features = list(booster_feature_names)
     missing = [c for c in model_features if c not in X_df.columns]
     if missing:
         raise ValueError(
