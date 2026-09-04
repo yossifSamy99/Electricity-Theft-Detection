@@ -3,7 +3,11 @@
 A machine learning system that classifies hourly electricity/gas consumption
 readings from commercial buildings as **Normal** or one of **6 theft
 patterns** (`Theft1`–`Theft6`), using an XGBoost multi-class classifier
-served through a self-contained Streamlit UI.
+served through a self-contained Streamlit UI — locally and on
+[Streamlit Community Cloud](https://streamlit.io/cloud).
+
+**Live demo:** `https://electricity-theft-detection-<your-id>.streamlit.app`
+*(update this once your app is deployed)*
 
 ---
 
@@ -17,7 +21,8 @@ classifier trained to distinguish normal usage from known theft/fraud
 signatures.
 
 The Streamlit app loads the trained model and preprocessing pipeline
-**directly via `joblib`** — there is no separate API layer in this version.
+**directly via `joblib`** — there is no separate API layer. Training happens
+in a GPU-enabled notebook (Google Colab); the app itself only needs CPU.
 
 ---
 
@@ -27,14 +32,17 @@ The Streamlit app loads the trained model and preprocessing pipeline
 .
 ├── app.py                          # Streamlit UI (single + batch prediction)
 ├── final_notebook.ipynb            # EDA, feature engineering, model training
-├── requirements.txt
+├── requirements.txt                # Pinned dependency versions (see below)
+├── sample_test_batch.csv           # Ready-made CSV for testing the Batch tab
 ├── data/
 │   └── df.csv                      # Training dataset
 ├── src/
+│   ├── __init__.py
 │   ├── artifacts/
 │   │   ├── best_xgboost_model.pkl  # Trained XGBoost model
 │   │   └── preprocessor.joblib     # Fitted sklearn Pipeline (feature eng. + encoding)
 │   └── utils/
+│       ├── __init__.py
 │       ├── transformers.py         # Custom sklearn transformers (FeatureEngineer, MixedPowerTransformer)
 │       └── schema.py               # Column names, building classes, theft labels
 └── test/
@@ -49,7 +57,7 @@ The Streamlit app loads the trained model and preprocessing pipeline
 
 ---
 
-## ⚙️ Installation
+## ⚙️ Local Installation
 
 ```bash
 python -m venv venv
@@ -59,25 +67,27 @@ venv\Scripts\activate          # Windows
 pip install -r requirements.txt
 ```
 
-**Pin your scikit-learn version explicitly.** A `preprocessor.joblib` fitted
-under one scikit-learn version can fail to unpickle under another
-(e.g. internal classes like `ColumnTransformer`'s remainder-columns helper
-have changed between minor versions). Train and serve with the *same*
-version:
+**Pin every version explicitly in `requirements.txt`** — this single file is
+what keeps your local environment, your training environment (Colab), and
+Streamlit Cloud all in sync:
 
 ```
+streamlit==1.38.0
 scikit-learn==1.6.1
 xgboost==2.1.1
-streamlit==1.38.0
 pandas
 numpy
 plotly
 joblib
 ```
 
+Whatever `scikit-learn`/`xgboost` versions you train with in Colab, copy
+those *exact* pins here — mismatched versions are the #1 source of the
+unpickling errors in the Troubleshooting section below.
+
 ---
 
-## ▶️ Usage
+## ▶️ Running Locally
 
 ```bash
 streamlit run app.py
@@ -93,8 +103,30 @@ Place `best_xgboost_model.pkl` and `preprocessor.joblib` in
   training data; get predictions, a class-distribution summary, and a
   downloadable results CSV.
 
-A ready-to-use `sample_test_batch.csv` is included for quickly testing the
-batch tab end-to-end.
+Use the included `sample_test_batch.csv` to quickly test the Batch tab
+end-to-end.
+
+---
+
+## ☁️ Deploying to Streamlit Community Cloud
+
+1. Push the full project (including `src/`, `requirements.txt`, and the
+   files in `src/artifacts/`) to a GitHub repo. If `best_xgboost_model.pkl`
+   is close to or over **100 MB**, use [Git LFS](https://git-lfs.com/) —
+   plain GitHub rejects files over that limit.
+2. On [share.streamlit.io](https://share.streamlit.io), create a new app
+   pointing to the repo, branch `main`, main file `app.py`.
+3. In **Advanced settings**, set the **Python version** explicitly to
+   **3.11 or 3.12**. Don't leave it on the newest available version
+   (e.g. 3.14) — `scikit-learn`/`xgboost` often don't have prebuilt wheels
+   for a Python version that new yet, which forces a from-source build that
+   can hang for a very long time during "Processing dependencies".
+4. Deploy, then watch **Manage app → Logs** live. A healthy deploy shows
+   `Using Python 3.11.x` (or 3.12.x) followed by package installs, then the
+   app starting — no more than a couple of minutes.
+5. After any change to `requirements.txt`, model files, or code, push to
+   GitHub — Streamlit Cloud rebuilds automatically. If it seems stuck,
+   use **Manage app → Reboot app** to force a clean rebuild.
 
 ---
 
@@ -148,6 +180,12 @@ All of the above is packaged into a single `sklearn.Pipeline` named
 `preprocessor`, so `preprocessor.transform(raw_df)` produces model-ready
 input in one call.
 
+`app.py` also auto-aligns the preprocessor's output to whatever columns the
+loaded model actually expects (see `_align_to_model_features` in `app.py`),
+so small mismatches between a `preprocessor.joblib`/model pair from
+different training runs don't crash the app outright — though re-fitting
+and saving both together in one run is always the more correct fix.
+
 ---
 
 ## 🛠️ Troubleshooting
@@ -155,9 +193,12 @@ input in one call.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `This Pipeline instance is not fitted yet` | `preprocessor.joblib` was saved before `.fit()`/`.fit_transform()` was called | Re-run `preprocessor.fit_transform(X_train)` **then** `joblib.dump(...)` |
-| `Can't get attribute '_RemainderColsList'` on unpickle | scikit-learn version mismatch between training and serving environments | Pin and match `scikit-learn` version exactly in both; verify with `python -c "import sklearn; print(sklearn.__version__, sklearn.__file__)"` using the **same interpreter** that runs Streamlit |
-| `Feature shape mismatch, expected: N, got: M` | `preprocessor.joblib` and the model `.pkl` were saved from different runs / different `OneHotEncoder` settings (e.g. `drop='first'` present in one but not the other) | Best fix: re-fit preprocessor + model together in one run and save both. If retraining isn't possible, `app.py` auto-aligns the preprocessor's output columns to `model.get_booster().feature_names`, dropping any extras — this is already handled in the shipped app |
+| `Can't get attribute '_RemainderColsList'` on unpickle | scikit-learn version mismatch between training and serving environments (locally, or between Colab and Streamlit Cloud) | Pin the exact same `scikit-learn` version everywhere in `requirements.txt`; verify locally with `python -c "import sklearn; print(sklearn.__version__, sklearn.__file__)"` using the **same interpreter** that runs Streamlit |
+| `Feature shape mismatch, expected: N, got: M` | `preprocessor.joblib` and the model `.pkl` were saved from different runs / different `OneHotEncoder` settings (e.g. `drop='first'` present in one but not the other) | Best fix: re-fit preprocessor + model together in one run and save both. `app.py` also auto-aligns columns by name as a fallback |
 | `ValueError` from Box-Cox during single-row prediction | A column fit with Box-Cox received a `0` or negative value at inference | Already handled in `MixedPowerTransformer.transform` (values clipped to a small positive epsilon) |
+| `'NoneType' object is not iterable` during prediction | The model was `.fit()` on a raw `numpy` array instead of a `pandas.DataFrame`, so `model.get_booster().feature_names` is `None` | Already handled in `app.py` (falls back to matching by column **count** via `model.n_features_in_`). For a cleaner long-term fix, wrap the preprocessor's output in a `DataFrame` with column names before `model.fit(...)` |
+| `ModuleNotFoundError` on Streamlit Cloud (message redacted) | Usually a missing package in `requirements.txt` (commonly `xgboost` or `plotly`), or `src/` wasn't actually pushed to GitHub | Check **Manage app → Logs** for the real module name; verify `requirements.txt` lists every import used in `app.py`; confirm `src/`, `src/utils/`, and `src/artifacts/` are present in the GitHub repo (check `.gitignore` isn't excluding them) |
+| Deploy stuck for 10+ minutes on "Processing dependencies" | Streamlit Cloud picked a very new Python version (e.g. 3.14) with no prebuilt wheels yet for `scikit-learn`/`xgboost`, forcing a slow/failing from-source build | In app **Settings → Advanced settings**, set Python version to **3.11 or 3.12**, then reboot the app |
 
 ---
 
@@ -170,8 +211,12 @@ See `requirements.txt`. Key dependencies: `streamlit`, `scikit-learn`,
 
 ## 📝 Notes
 
-- The model and preprocessor **must always be re-saved together** after any
-  change to either — they are only valid as a matched pair.
+- The model and preprocessor **must always be re-saved together**, in the
+  same notebook run, after any change to either — they are only valid as a
+  matched pair.
 - `src/utils/transformers.py` and `src/utils/schema.py` are shared between
   the training notebook and `app.py`; keep them as the single source of
   truth for feature engineering and column definitions.
+- Keep `requirements.txt` as the single source of truth for package
+  versions across your local machine, Colab, and Streamlit Cloud — update
+  all three together whenever you change a version.
